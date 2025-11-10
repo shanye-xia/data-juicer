@@ -291,8 +291,9 @@ class RayDataset(DJDataset):
     def to_list(self) -> list:
         return self.data.to_pandas().to_dict(orient="records")
 
-
-class JSONStreamDatasource(ray.data.read_api.JSONDatasource):
+# JSONStreamDatasource继承的类ray.data.read_api.JSONDatasource在新版本已弃用
+# 修改为继承 ray.data.datasource.FileBasedDatasource
+# class JSONStreamDatasource(ray.data.read_api.JSONDatasource):
     """
     A temp Datasource for reading json stream.
 
@@ -323,6 +324,68 @@ class JSONStreamDatasource(ray.data.read_api.JSONDatasource):
         except pyarrow.lib.ArrowInvalid as e:
             raise ValueError(f"Failed to read JSON file: {path}.") from e
 
+#修改之后的代码
+
+class JSONStreamDatasource(ray.data.datasource.FileBasedDatasource):
+    """
+    A temp Datasource for reading json stream, adapted for newer Ray versions.
+
+    Note:
+
+        Depends on a customized `pyarrow` with `open_json` method.
+    """
+
+    def __init__(
+        self,
+        paths: Union[str, List[str]],
+        arrow_json_args: Optional[Dict[str, Any]] = None,
+        filesystem: Optional["pyarrow.fs.FileSystem"] = None,
+        open_stream_args: Optional[Dict[str, Any]] = None,
+        meta_provider=None,
+        partition_filter=None,
+        partitioning=ray.data.read_api.Partitioning("hive"),
+        ignore_missing_paths: bool = False,
+        shuffle: Union[Literal["files"], None] = None,
+        include_paths: bool = False,
+        file_extensions: Optional[List[str]] = ["json", "jsonl"],
+    ):
+        super().__init__(
+            paths,
+            filesystem=filesystem,
+            meta_provider=meta_provider,
+            partition_filter=partition_filter,
+            partitioning=partitioning,
+            ignore_missing_paths=ignore_missing_paths,
+            file_extensions=file_extensions,
+        )
+        self.arrow_json_args = arrow_json_args or {}
+        self.read_options = self.arrow_json_args.get("read_options", pyarrow.json.ReadOptions())
+        self.open_stream_args = open_stream_args or {}
+
+    def _read_stream(self, f: "pyarrow.NativeFile", path: str, **kwargs):
+        from pyarrow.json import open_json
+
+        try:
+            reader = open_json(f,
+                               read_options=self.read_options,
+                               **self.arrow_json_args,
+                              )
+            schema = None
+            while True:
+                try:
+                    batch = reader.read_next_batch()
+                    table = pyarrow.Table.from_batches([batch], schema=schema)
+                    if schema is None:
+                        schema = table.schema
+                    yield table
+                except StopIteration:
+                    return
+        except pyarrow.lib.ArrowInvalid as e:
+            raise ValueError(f"Failed to read JSON file: {path}.") from e
+
+    @property
+    def file_extensions(self):
+        return ["json", "jsonl"]
 
 def read_json_stream(
     paths: Union[str, List[str]],
